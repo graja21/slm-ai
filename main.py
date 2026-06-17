@@ -1,17 +1,11 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from fastapi import UploadFile, File
+from fastapi import FastAPI, UploadFile, File
 from pypdf import PdfReader
 from io import BytesIO
-import requests
+from models.requests import TextRequest
+from services.ollama_service import ask_model
 import json
 
-
 app = FastAPI(title="SLM AI Backend")
-
-
-class TextRequest(BaseModel):
-    text: str
 
 
 @app.get("/")
@@ -21,104 +15,26 @@ def home():
     }
 
 
-
-
-@app.post("/upload-pdf")
-async def upload_pdf(file: UploadFile = File(...)):
-
-    pdf_bytes = await file.read()
-
-    reader = PdfReader(BytesIO(pdf_bytes))
-
-    text = ""
-
-    for page in reader.pages:
-        page_text = page.extract_text()
-
-        if page_text:
-            text += page_text + "\n"
-
-    prompt = f"""
-Résume ce document PDF en français en 5 lignes maximum.
-
-Document :
-{text}
-"""
-
-    response = requests.post(
-        "http://localhost:11434/api/generate",
-        json={
-            "model": "mistral",
-            "prompt": prompt,
-            "stream": False
-        }
-    )
-
-    return {
-        "filename": file.filename,
-        "pages": len(reader.pages),
-        "summary": response.json()["response"]
-    }
-
-
-@app.post("/upload-txt")
-async def upload_txt(file: UploadFile = File(...)):
-
-    content = await file.read()
-    text = content.decode("utf-8")
-
-    prompt = f"""
-Résume ce document en français en 5 lignes maximum.
-
-Document :
-{text}
-"""
-
-    response = requests.post(
-        "http://localhost:11434/api/generate",
-        json={
-            "model": "mistral",
-            "prompt": prompt,
-            "stream": False
-        }
-    )
-
-    return {
-        "filename": file.filename,
-        "summary": response.json()["response"]
-    }
-
-
 @app.post("/summarize")
 def summarize(req: TextRequest):
-
     prompt = f"""
 Tu es un assistant IA spécialisé en résumé.
-
 Résume le texte suivant en français en 5 lignes maximum.
 
 Texte :
 {req.text}
 """
 
-    response = requests.post(
-        "http://localhost:11434/api/generate",
-        json={
-            "model": "mistral",
-            "prompt": prompt,
-            "stream": False
-        }
-    )
+    result = ask_model(prompt)
 
     return {
         "model": "mistral",
-        "summary": response.json()["response"]
+        "summary": result
     }
 
 
 @app.post("/extract")
 def extract(req: TextRequest):
-
     prompt = f"""
 Tu es un expert en extraction d'informations.
 
@@ -137,16 +53,7 @@ Texte :
 {req.text}
 """
 
-    response = requests.post(
-        "http://localhost:11434/api/generate",
-        json={
-            "model": "mistral",
-            "prompt": prompt,
-            "stream": False
-        }
-    )
-
-    raw_result = response.json()["response"]
+    raw_result = ask_model(prompt)
 
     try:
         parsed_result = json.loads(raw_result)
@@ -162,15 +69,12 @@ Texte :
     }
 
 
-
 @app.post("/classify")
 def classify(req: TextRequest):
-
     prompt = f"""
 Tu es un expert en classification de documents.
 
 Choisis UNE SEULE catégorie parmi :
-
 - Finance
 - Juridique
 - Ressources Humaines
@@ -184,15 +88,56 @@ Texte :
 {req.text}
 """
 
-    response = requests.post(
-        "http://localhost:11434/api/generate",
-        json={
-            "model": "mistral",
-            "prompt": prompt,
-            "stream": False
-        }
-    )
+    result = ask_model(prompt)
 
     return {
-        "category": response.json()["response"].strip()
+        "category": result.strip()
+    }
+
+
+@app.post("/upload-txt")
+async def upload_txt(file: UploadFile = File(...)):
+    content = await file.read()
+    text = content.decode("utf-8")
+
+    prompt = f"""
+Résume ce document en français en 5 lignes maximum.
+
+Document :
+{text}
+"""
+
+    result = ask_model(prompt)
+
+    return {
+        "filename": file.filename,
+        "summary": result
+    }
+
+
+@app.post("/upload-pdf")
+async def upload_pdf(file: UploadFile = File(...)):
+    pdf_bytes = await file.read()
+    reader = PdfReader(BytesIO(pdf_bytes))
+
+    text = ""
+
+    for page in reader.pages:
+        page_text = page.extract_text()
+        if page_text:
+            text += page_text + "\n"
+
+    prompt = f"""
+Résume ce document PDF en français en 5 lignes maximum.
+
+Document :
+{text}
+"""
+
+    result = ask_model(prompt)
+
+    return {
+        "filename": file.filename,
+        "pages": len(reader.pages),
+        "summary": result
     }

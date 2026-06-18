@@ -1,6 +1,8 @@
 from fastapi import FastAPI, UploadFile, File
 from pypdf import PdfReader
 from io import BytesIO
+import time
+from services.mlflow_service import log_financial_extraction
 from models.requests import TextRequest
 from services.ollama_service import ask_model
 import json
@@ -140,4 +142,67 @@ Document :
         "filename": file.filename,
         "pages": len(reader.pages),
         "summary": result
+    }
+
+
+
+
+
+@app.post("/financial-extract")
+def financial_extract(req: TextRequest):
+    start_time = time.time()
+
+    prompt = f"""
+Tu es un expert en analyse financière.
+
+Extrait uniquement les informations financières du texte suivant.
+
+Retourne UNIQUEMENT un JSON valide avec cette structure :
+
+{{
+    "company_name": "",
+    "period": "",
+    "revenue": "",
+    "net_profit": "",
+    "expenses": "",
+    "growth_rate": "",
+    "currency": "",
+    "dates": [],
+    "financial_indicators": [],
+    "risks": [],
+    "summary": ""
+}}
+
+Si une information n'existe pas dans le texte, utilise null ou [].
+N'invente aucune information.
+
+Texte :
+{req.text}
+"""
+
+    raw_result = ask_model(prompt)
+    execution_time = time.time() - start_time
+
+    try:
+        parsed_result = json.loads(raw_result)
+        json_valid = True
+    except json.JSONDecodeError:
+        parsed_result = {
+            "error": "Model did not return valid JSON",
+            "raw_response": raw_result
+        }
+        json_valid = False
+
+    log_financial_extraction(
+        model="mistral",
+        prompt_version="v1",
+        input_length=len(req.text),
+        execution_time=execution_time,
+        json_valid=json_valid
+    )
+
+    return {
+        "model": "mistral",
+        "task": "financial_extraction",
+        "result": parsed_result
     }

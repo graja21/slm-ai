@@ -210,3 +210,94 @@ Texte :
         "task": "financial_extraction",
         "result": parsed_result
     }
+
+
+@app.post("/financial-pdf")
+async def financial_pdf(file: UploadFile = File(...)):
+    start_time = time.time()
+
+    pdf_bytes = await file.read()
+    reader = PdfReader(BytesIO(pdf_bytes))
+
+    text = ""
+
+    for page in reader.pages:
+        page_text = page.extract_text()
+        if page_text:
+            text += page_text + "\n"
+
+    original_text_length = len(text)
+
+    # Important: limit PDF text size so Mistral follows the JSON instruction better
+    text = text[:6000]
+
+    prompt = f"""
+Tu es un moteur d'extraction JSON spécialisé en documents financiers.
+
+IMPORTANT :
+- Réponds uniquement avec un JSON valide.
+- Ne donne aucune explication.
+- Ne donne aucun texte avant ou après le JSON.
+- Ne fais pas de résumé hors JSON.
+- La réponse doit commencer par {{ et finir par }}.
+- Si une information n'existe pas dans le document, utilise null ou [].
+- N'invente aucune information.
+
+Retourne exactement cette structure JSON :
+
+{{
+    "company_name": null,
+    "document_type": null,
+    "period": null,
+    "total_assets": null,
+    "net_assets": null,
+    "revenue": null,
+    "net_profit": null,
+    "expenses": null,
+    "growth_rate": null,
+    "currency": null,
+    "important_dates": [],
+    "financial_indicators": [],
+    "risks_or_observations": [],
+    "summary": null
+}}
+
+Document :
+{text}
+"""
+
+    raw_result = ask_model(prompt, model="mistral")
+
+    raw_result = raw_result.replace("```json", "")
+    raw_result = raw_result.replace("```", "")
+    raw_result = raw_result.strip()
+
+    execution_time = time.time() - start_time
+
+    try:
+        parsed_result = json.loads(raw_result)
+        json_valid = True
+    except json.JSONDecodeError:
+        parsed_result = {
+            "error": "Model did not return valid JSON",
+            "raw_response": raw_result
+        }
+        json_valid = False
+
+    log_financial_extraction(
+        model="mistral",
+        prompt_version="financial_pdf_v2",
+        input_length=len(text),
+        execution_time=execution_time,
+        json_valid=json_valid
+    )
+
+    return {
+        "model": "mistral",
+        "task": "financial_pdf_extraction",
+        "filename": file.filename,
+        "pages": len(reader.pages),
+        "original_text_length": original_text_length,
+        "used_text_length": len(text),
+        "result": parsed_result
+    }

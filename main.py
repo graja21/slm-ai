@@ -2,10 +2,11 @@ from fastapi import FastAPI, UploadFile, File
 from pypdf import PdfReader
 from io import BytesIO
 import time
-from services.mlflow_service import log_financial_extraction
-from models.requests import TextRequest
-from services.ollama_service import ask_model
 import json
+
+from models.requests import TextRequest, ModelTextRequest
+from services.ollama_service import ask_model
+from services.mlflow_service import log_financial_extraction
 
 app = FastAPI(title="SLM AI Backend")
 
@@ -72,7 +73,7 @@ Texte :
 
 
 @app.post("/classify")
-def classify(req: TextRequest):
+def classify(req: ModelTextRequest):
     prompt = f"""
 Tu es un expert en classification de documents.
 
@@ -90,9 +91,10 @@ Texte :
 {req.text}
 """
 
-    result = ask_model(prompt)
+    result = ask_model(prompt, model=req.model)
 
     return {
+        "model": req.model,
         "category": result.strip()
     }
 
@@ -145,11 +147,8 @@ Document :
     }
 
 
-
-
-
 @app.post("/financial-extract")
-def financial_extract(req: TextRequest):
+def financial_extract(req: ModelTextRequest):
     start_time = time.time()
 
     prompt = f"""
@@ -180,7 +179,12 @@ Texte :
 {req.text}
 """
 
-    raw_result = ask_model(prompt)
+    raw_result = ask_model(prompt, model=req.model)
+
+    raw_result = raw_result.replace("```json", "")
+    raw_result = raw_result.replace("```", "")
+    raw_result = raw_result.strip()
+
     execution_time = time.time() - start_time
 
     try:
@@ -194,7 +198,7 @@ Texte :
         json_valid = False
 
     log_financial_extraction(
-        model="mistral",
+        model=req.model,
         prompt_version="v1",
         input_length=len(req.text),
         execution_time=execution_time,
@@ -202,7 +206,7 @@ Texte :
     )
 
     return {
-        "model": "mistral",
+        "model": req.model,
         "task": "financial_extraction",
         "result": parsed_result
     }

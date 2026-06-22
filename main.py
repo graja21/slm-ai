@@ -3,12 +3,23 @@ from pypdf import PdfReader
 from io import BytesIO
 import time
 import json
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 
-from models.requests import TextRequest, ModelTextRequest
+from models.requests import TextRequest, ModelTextRequest, QuestionRequest
 from services.ollama_service import ask_model
 from services.mlflow_service import log_financial_extraction
 
 app = FastAPI(title="SLM AI Backend")
+
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+rag_store = {
+    "filename": None,
+    "chunks": [],
+    "embeddings": None
+}
 
 
 def split_text_into_chunks(text, chunk_size=4000):
@@ -328,8 +339,6 @@ async def financial_pdf_chunked(
             text += page_text + "\n"
 
     chunks = split_text_into_chunks(text, chunk_size=4000)
-
-    # Limited for speed during demo/testing
     chunks = chunks[:5]
 
     chunk_results = []
@@ -411,4 +420,88 @@ Morceau du document :
         "invalid_chunks": invalid_chunks,
         "final_result": final_result,
         "chunk_results": chunk_results
+    }
+
+
+@app.post("/index-pdf")
+async def index_pdf(file: UploadFile = File(...)):
+    pdf_bytes = await file.read()
+    reader = PdfReader(BytesIO(pdf_bytes))
+
+    text = ""
+
+    for page in reader.pages:
+        page_text = page.extract_text()
+        if page_text:
+            text += page_text + "\n"
+
+    chunks = split_text_into_chunks(text, chunk_size=1000)
+
+    embeddings = embedding_model.encode(chunks)
+
+    rag_store["filename"] = file.filename
+    rag_store["chunks"] = chunks
+    rag_store["embeddings"] = embeddings
+
+    return {
+        "message": "PDF indexed successfully",
+        "filename": file.filename,
+        "pages": len(reader.pages),
+        "chunks_count": len(chunks),
+        "embedding_model": "all-MiniLM-L6-v2"
+    }
+
+
+@app.post("/ask-document")
+def ask_document(req: QuestionRequest):
+    if rag_store["embeddings"] is None or len(rag_store["chunks"]) == 0:
+        return {
+            "error": "No PDF indexed. Please upload a PDF first using /index-pdf."
+        }
+
+    question_embedding = embedding_model.encode([req.question])
+
+    similarities = cosine_similarity(
+        question_embedding,
+        rag_store["embeddings"]
+    )[0]
+
+    top_k = 3
+    top_indices = np.argsort(similarities)[-top_k:][::-1]
+
+    relevant_chunks = []
+
+    for index in top_indices:
+        relevant_chunks.append(rag_store["chunks"][index])
+
+    context = "\n\n---\n\n".join(relevant_chunks)
+
+    prompt = f"""
+Tu es un assistant spécialisé en analyse de documents financiers.
+
+Réponds à la question en utilisant uniquement le contexte fourni.
+Si la réponse n'existe pas dans le contexte, réponds :
+"Je ne trouve pas cette information dans le document."
+
+Document indexé :
+{rag_store["filename"]}
+
+Contexte :
+{context}
+
+Question :
+{req.question}
+
+Réponse en français :
+"""
+
+    answer = ask_model(prompt, model=req.model)
+
+    return {
+        "model": req.model,
+        "filename": rag_store["filename"],
+        "question": req.question,
+        "top_chunks_used": [int(i) for i in top_indices],
+        "similarity_scores": [float(similarities[i]) for i in top_indices],
+        "answer": answer
     }

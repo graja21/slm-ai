@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Query
 from pypdf import PdfReader
 from io import BytesIO
 import time
@@ -43,31 +43,19 @@ def merge_financial_results(chunk_results):
     }
 
     simple_fields = [
-        "company_name",
-        "document_type",
-        "period",
-        "total_assets",
-        "net_assets",
-        "revenue",
-        "net_profit",
-        "expenses",
-        "growth_rate",
-        "currency",
-        "summary"
+        "company_name", "document_type", "period", "total_assets",
+        "net_assets", "revenue", "net_profit", "expenses",
+        "growth_rate", "currency", "summary"
     ]
 
     for item in chunk_results:
         result = item.get("result", {})
 
-        if not isinstance(result, dict):
-            continue
-
-        if "error" in result:
+        if not isinstance(result, dict) or "error" in result:
             continue
 
         for field in simple_fields:
             value = result.get(field)
-
             if final_result[field] in [None, "", []] and value not in [None, "", []]:
                 final_result[field] = value
 
@@ -121,9 +109,7 @@ def validate_financial_result(final_result):
 
 @app.get("/")
 def home():
-    return {
-        "message": "SLM AI Backend is running"
-    }
+    return {"message": "SLM AI Backend is running"}
 
 
 @app.post("/classify")
@@ -325,7 +311,10 @@ Document :
 
 
 @app.post("/financial-pdf-chunked")
-async def financial_pdf_chunked(file: UploadFile = File(...)):
+async def financial_pdf_chunked(
+    file: UploadFile = File(...),
+    model: str = Query("mistral")
+):
     start_time = time.time()
 
     pdf_bytes = await file.read()
@@ -380,7 +369,7 @@ Morceau du document :
 {chunk}
 """
 
-        raw_result = ask_model(prompt, model="mistral")
+        raw_result = ask_model(prompt, model=model)
         raw_result = clean_json_response(raw_result)
 
         try:
@@ -405,15 +394,15 @@ Morceau du document :
     json_valid = invalid_chunks == 0
 
     log_financial_extraction(
-        model="mistral",
-        prompt_version="financial_pdf_chunked_v3_validated",
+        model=model,
+        prompt_version="financial_pdf_chunked_v4_model_select",
         input_length=len(text),
         execution_time=execution_time,
         json_valid=json_valid
     )
 
     return {
-        "model": "mistral",
+        "model": model,
         "task": "financial_pdf_chunked_extraction",
         "filename": file.filename,
         "pages": len(reader.pages),

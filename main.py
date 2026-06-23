@@ -466,26 +466,53 @@ def ask_document(req: QuestionRequest):
         rag_store["embeddings"]
     )[0]
 
-    # 1) Semantic search: top 12 chunks
     semantic_top_k = 12
     semantic_indices = np.argsort(similarities)[-semantic_top_k:][::-1]
 
-    # 2) Keyword search
     question_lower = req.question.lower()
 
     keyword_groups = {
-        "total actifs": ["total actifs", "total actif", "total assets", "actifs"],
-        "total passifs": ["total passifs", "total passif", "passifs"],
-        "résultat net": ["résultat net", "resultat net", "bénéfice net", "benefice net", "net profit", "résultat de l'exercice"],
-        "revenu": ["revenu", "produit", "produits", "produits d'exploitation", "revenue"],
-        "charges": ["charges", "dépenses", "expenses"],
-        "risques": ["risque", "risques", "observations", "provisions"],
-        "date": ["date", "clôture", "exercice", "31 décembre"]
+        "total actifs": ["total actifs", "total actif", "total des actifs", "actifs"],
+        "total passifs": ["total passifs", "total passif", "total des passifs", "passifs"],
+        "résultat net": [
+            "résultat net",
+            "resultat net",
+            "résultat de l'exercice",
+            "resultat de l'exercice",
+            "bénéfice net",
+            "benefice net",
+            "net profit"
+        ],
+        "produit net bancaire": [
+            "produit net bancaire",
+            "produits d'exploitation bancaire",
+            "total produits",
+            "revenu",
+            "revenue"
+        ],
+        "charges": [
+            "charges",
+            "charges d'exploitation bancaire",
+            "dépenses",
+            "expenses"
+        ],
+        "capitaux propres": [
+            "capitaux propres",
+            "total capitaux propres",
+            "net assets"
+        ],
+        "risques": [
+            "risque",
+            "risques",
+            "observations",
+            "provisions",
+            "créances classées"
+        ]
     }
 
     selected_keywords = []
 
-    for group_name, keywords in keyword_groups.items():
+    for keywords in keyword_groups.values():
         for keyword in keywords:
             if keyword in question_lower:
                 selected_keywords.extend(keywords)
@@ -498,21 +525,19 @@ def ask_document(req: QuestionRequest):
             if any(keyword in chunk_lower for keyword in selected_keywords):
                 keyword_indices.append(i)
 
-    # Keep first 8 keyword chunks
-    keyword_indices = keyword_indices[:8]
+    keyword_indices = keyword_indices[:10]
 
-    # 3) Merge semantic + keyword chunks without duplicates
     final_indices = []
+
+    # Important: keyword chunks FIRST
+    for i in keyword_indices:
+        if int(i) not in final_indices:
+            final_indices.append(int(i))
 
     for i in semantic_indices:
         if int(i) not in final_indices:
             final_indices.append(int(i))
 
-    for i in keyword_indices:
-        if int(i) not in final_indices:
-            final_indices.append(int(i))
-
-    # More context for financial reports
     final_indices = final_indices[:15]
 
     relevant_chunks = [rag_store["chunks"][i] for i in final_indices]
@@ -522,14 +547,21 @@ def ask_document(req: QuestionRequest):
 Tu es un assistant spécialisé en analyse de documents financiers.
 
 Réponds à la question en utilisant uniquement le contexte fourni.
-Si la réponse n'existe pas dans le contexte, réponds exactement :
+
+Règles importantes :
+- Donne une réponse courte et précise.
+- Si la question demande un chiffre, donne le chiffre exact avec son unité.
+- Ne mélange pas plusieurs lignes financières.
+- Ne choisis pas un chiffre approximatif.
+- Si plusieurs valeurs existent, explique brièvement laquelle correspond à la question.
+- Si l'information n'existe pas dans le contexte, réponds exactement :
 "Je ne trouve pas cette information dans le document."
 
-Important :
-- Donne une réponse courte et claire.
-- Si la question demande un chiffre financier, donne le chiffre exact avec son unité si elle existe.
-- N'invente aucune information.
-- Cherche aussi les synonymes financiers : résultat net, résultat de l'exercice, bénéfice net.
+Attention aux synonymes :
+- "résultat net" = "résultat de l'exercice"
+- "total actifs" = "total des actifs"
+- "total passifs" = "total des passifs"
+- "capitaux propres" = "total capitaux propres"
 
 Document indexé :
 {rag_store["filename"]}
@@ -549,8 +581,8 @@ Réponse claire et courte en français :
         "model": req.model,
         "filename": rag_store["filename"],
         "question": req.question,
-        "semantic_chunks": [int(i) for i in semantic_indices],
         "keyword_chunks": [int(i) for i in keyword_indices],
+        "semantic_chunks": [int(i) for i in semantic_indices],
         "final_chunks_used": final_indices,
         "similarity_scores": [float(similarities[i]) for i in semantic_indices],
         "answer": answer

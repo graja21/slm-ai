@@ -466,7 +466,7 @@ def ask_document(req: QuestionRequest):
         rag_store["embeddings"]
     )[0]
 
-    top_k = 3
+    top_k = 8
     top_indices = np.argsort(similarities)[-top_k:][::-1]
 
     relevant_chunks = []
@@ -480,7 +480,7 @@ def ask_document(req: QuestionRequest):
 Tu es un assistant spécialisé en analyse de documents financiers.
 
 Réponds à la question en utilisant uniquement le contexte fourni.
-Si la réponse n'existe pas dans le contexte, réponds :
+Si la réponse n'existe pas dans le contexte, réponds exactement :
 "Je ne trouve pas cette information dans le document."
 
 Document indexé :
@@ -492,7 +492,7 @@ Contexte :
 Question :
 {req.question}
 
-Réponse en français :
+Réponse claire et courte en français :
 """
 
     answer = ask_model(prompt, model=req.model)

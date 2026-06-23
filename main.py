@@ -466,13 +466,55 @@ def ask_document(req: QuestionRequest):
         rag_store["embeddings"]
     )[0]
 
-    top_k = 8
-    top_indices = np.argsort(similarities)[-top_k:][::-1]
+    # 1) Semantic search: top 8 chunks
+    semantic_top_k = 8
+    semantic_indices = np.argsort(similarities)[-semantic_top_k:][::-1]
 
-    relevant_chunks = []
+    # 2) Keyword search
+    question_lower = req.question.lower()
 
-    for index in top_indices:
-        relevant_chunks.append(rag_store["chunks"][index])
+    keyword_groups = {
+        "total actifs": ["total actifs", "total actif", "total assets", "actifs"],
+        "total passifs": ["total passifs", "total passif", "passifs"],
+        "résultat net": ["résultat net", "benefice net", "bénéfice net", "net profit"],
+        "revenu": ["revenu", "produit", "produits", "revenue"],
+        "risques": ["risque", "risques", "observations", "provisions"],
+        "date": ["date", "clôture", "exercice", "31 décembre"]
+    }
+
+    selected_keywords = []
+
+    for group_name, keywords in keyword_groups.items():
+        for keyword in keywords:
+            if keyword in question_lower:
+                selected_keywords.extend(keywords)
+
+    keyword_indices = []
+
+    if selected_keywords:
+        for i, chunk in enumerate(rag_store["chunks"]):
+            chunk_lower = chunk.lower()
+            if any(keyword in chunk_lower for keyword in selected_keywords):
+                keyword_indices.append(i)
+
+    # Keep only first 5 keyword chunks to avoid huge context
+    keyword_indices = keyword_indices[:5]
+
+    # 3) Merge semantic + keyword chunks without duplicates
+    final_indices = []
+
+    for i in semantic_indices:
+        if int(i) not in final_indices:
+            final_indices.append(int(i))
+
+    for i in keyword_indices:
+        if int(i) not in final_indices:
+            final_indices.append(int(i))
+
+    # Limit final context
+    final_indices = final_indices[:10]
+
+    relevant_chunks = [rag_store["chunks"][i] for i in final_indices]
 
     context = "\n\n---\n\n".join(relevant_chunks)
 
@@ -482,6 +524,11 @@ Tu es un assistant spécialisé en analyse de documents financiers.
 Réponds à la question en utilisant uniquement le contexte fourni.
 Si la réponse n'existe pas dans le contexte, réponds exactement :
 "Je ne trouve pas cette information dans le document."
+
+Important :
+- Donne une réponse courte et claire.
+- Si la question demande un chiffre financier, donne le chiffre exact avec son unité si elle existe.
+- N'invente aucune information.
 
 Document indexé :
 {rag_store["filename"]}
@@ -501,7 +548,9 @@ Réponse claire et courte en français :
         "model": req.model,
         "filename": rag_store["filename"],
         "question": req.question,
-        "top_chunks_used": [int(i) for i in top_indices],
-        "similarity_scores": [float(similarities[i]) for i in top_indices],
+        "semantic_chunks": [int(i) for i in semantic_indices],
+        "keyword_chunks": [int(i) for i in keyword_indices],
+        "final_chunks_used": final_indices,
+        "similarity_scores": [float(similarities[i]) for i in semantic_indices],
         "answer": answer
     }

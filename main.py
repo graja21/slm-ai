@@ -466,8 +466,8 @@ def ask_document(req: QuestionRequest):
         rag_store["embeddings"]
     )[0]
 
-    # 1) Semantic search: top 8 chunks
-    semantic_top_k = 8
+    # 1) Semantic search: top 12 chunks
+    semantic_top_k = 12
     semantic_indices = np.argsort(similarities)[-semantic_top_k:][::-1]
 
     # 2) Keyword search
@@ -476,8 +476,9 @@ def ask_document(req: QuestionRequest):
     keyword_groups = {
         "total actifs": ["total actifs", "total actif", "total assets", "actifs"],
         "total passifs": ["total passifs", "total passif", "passifs"],
-        "résultat net": ["résultat net", "benefice net", "bénéfice net", "net profit"],
-        "revenu": ["revenu", "produit", "produits", "revenue"],
+        "résultat net": ["résultat net", "resultat net", "bénéfice net", "benefice net", "net profit", "résultat de l'exercice"],
+        "revenu": ["revenu", "produit", "produits", "produits d'exploitation", "revenue"],
+        "charges": ["charges", "dépenses", "expenses"],
         "risques": ["risque", "risques", "observations", "provisions"],
         "date": ["date", "clôture", "exercice", "31 décembre"]
     }
@@ -497,8 +498,8 @@ def ask_document(req: QuestionRequest):
             if any(keyword in chunk_lower for keyword in selected_keywords):
                 keyword_indices.append(i)
 
-    # Keep only first 5 keyword chunks to avoid huge context
-    keyword_indices = keyword_indices[:5]
+    # Keep first 8 keyword chunks
+    keyword_indices = keyword_indices[:8]
 
     # 3) Merge semantic + keyword chunks without duplicates
     final_indices = []
@@ -511,11 +512,10 @@ def ask_document(req: QuestionRequest):
         if int(i) not in final_indices:
             final_indices.append(int(i))
 
-    # Limit final context
-    final_indices = final_indices[:10]
+    # More context for financial reports
+    final_indices = final_indices[:15]
 
     relevant_chunks = [rag_store["chunks"][i] for i in final_indices]
-
     context = "\n\n---\n\n".join(relevant_chunks)
 
     prompt = f"""
@@ -529,6 +529,7 @@ Important :
 - Donne une réponse courte et claire.
 - Si la question demande un chiffre financier, donne le chiffre exact avec son unité si elle existe.
 - N'invente aucune information.
+- Cherche aussi les synonymes financiers : résultat net, résultat de l'exercice, bénéfice net.
 
 Document indexé :
 {rag_store["filename"]}

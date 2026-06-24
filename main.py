@@ -3,6 +3,8 @@ from pypdf import PdfReader
 from io import BytesIO
 import time
 import json
+import os
+import pickle
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -15,11 +17,29 @@ app = FastAPI(title="SLM AI Backend")
 
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
+RAG_STORAGE_PATH = "rag_storage/rag_store.pkl"
+
 rag_store = {
     "filename": None,
     "chunks": [],
     "embeddings": None
 }
+
+
+def save_rag_store():
+    os.makedirs("rag_storage", exist_ok=True)
+    with open(RAG_STORAGE_PATH, "wb") as f:
+        pickle.dump(rag_store, f)
+
+
+def load_rag_store():
+    global rag_store
+    if os.path.exists(RAG_STORAGE_PATH):
+        with open(RAG_STORAGE_PATH, "rb") as f:
+            rag_store = pickle.load(f)
+
+
+load_rag_store()
 
 
 def split_text_into_chunks(text, chunk_size=4000):
@@ -123,6 +143,59 @@ def home():
     return {"message": "SLM AI Backend is running"}
 
 
+@app.post("/summarize")
+def summarize(req: TextRequest):
+    prompt = f"""
+Tu es un assistant IA spécialisé en résumé.
+Résume le texte suivant en français en 5 lignes maximum.
+
+Texte :
+{req.text}
+"""
+    result = ask_model(prompt, model="mistral")
+
+    return {
+        "model": "mistral",
+        "summary": result
+    }
+
+
+@app.post("/extract")
+def extract(req: TextRequest):
+    prompt = f"""
+Tu es un expert en extraction d'informations.
+
+Analyse le texte suivant et retourne UNIQUEMENT un JSON valide avec cette structure :
+
+{{
+    "people": [],
+    "companies": [],
+    "locations": [],
+    "dates": [],
+    "numbers": [],
+    "keywords": []
+}}
+
+Texte :
+{req.text}
+"""
+    raw_result = ask_model(prompt, model="mistral")
+    raw_result = clean_json_response(raw_result)
+
+    try:
+        parsed_result = json.loads(raw_result)
+    except json.JSONDecodeError:
+        parsed_result = {
+            "error": "Model did not return valid JSON",
+            "raw_response": raw_result
+        }
+
+    return {
+        "model": "mistral",
+        "result": parsed_result
+    }
+
+
 @app.post("/classify")
 def classify(req: ModelTextRequest):
     prompt = f"""
@@ -141,7 +214,6 @@ Réponds uniquement avec le nom de la catégorie.
 Texte :
 {req.text}
 """
-
     result = ask_model(prompt, model=req.model)
 
     return {
@@ -178,7 +250,6 @@ N'invente aucune information.
 Texte :
 {req.text}
 """
-
     raw_result = ask_model(prompt, model=req.model)
     raw_result = clean_json_response(raw_result)
 
@@ -227,7 +298,6 @@ Résume ce document PDF en français en 5 lignes maximum.
 Document :
 {text[:6000]}
 """
-
     result = ask_model(prompt, model="mistral")
 
     return {
@@ -286,7 +356,6 @@ Retourne exactement cette structure JSON :
 Document :
 {text}
 """
-
     raw_result = ask_model(prompt, model="mistral")
     raw_result = clean_json_response(raw_result)
 
@@ -339,6 +408,8 @@ async def financial_pdf_chunked(
             text += page_text + "\n"
 
     chunks = split_text_into_chunks(text, chunk_size=4000)
+
+    # Stable old version: process only first 5 chunks for speed
     chunks = chunks[:5]
 
     chunk_results = []
@@ -377,7 +448,6 @@ Retourne exactement cette structure JSON :
 Morceau du document :
 {chunk}
 """
-
         raw_result = ask_model(prompt, model=model)
         raw_result = clean_json_response(raw_result)
 
@@ -436,19 +506,37 @@ async def index_pdf(file: UploadFile = File(...)):
             text += page_text + "\n"
 
     chunks = split_text_into_chunks(text, chunk_size=1000)
-
     embeddings = embedding_model.encode(chunks)
 
     rag_store["filename"] = file.filename
     rag_store["chunks"] = chunks
     rag_store["embeddings"] = embeddings
 
+    save_rag_store()
+
     return {
         "message": "PDF indexed successfully",
         "filename": file.filename,
         "pages": len(reader.pages),
         "chunks_count": len(chunks),
-        "embedding_model": "all-MiniLM-L6-v2"
+        "embedding_model": "all-MiniLM-L6-v2",
+        "persistent_storage": True
+    }
+
+
+@app.get("/rag-status")
+def rag_status():
+    if rag_store["embeddings"] is None or len(rag_store["chunks"]) == 0:
+        return {
+            "indexed": False,
+            "message": "No PDF indexed."
+        }
+
+    return {
+        "indexed": True,
+        "filename": rag_store["filename"],
+        "chunks_count": len(rag_store["chunks"]),
+        "persistent_storage_path": RAG_STORAGE_PATH
     }
 
 
@@ -529,7 +617,7 @@ def ask_document(req: QuestionRequest):
 
     final_indices = []
 
-    # Important: keyword chunks FIRST
+    # Keyword chunks first
     for i in keyword_indices:
         if int(i) not in final_indices:
             final_indices.append(int(i))
@@ -574,7 +662,6 @@ Question :
 
 Réponse claire et courte en français :
 """
-
     answer = ask_model(prompt, model=req.model)
 
     return {

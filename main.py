@@ -48,8 +48,21 @@ def split_text_into_chunks(text, chunk_size=4000):
 
 
 def clean_json_response(raw_result):
+    if raw_result is None:
+        return ""
+
     raw_result = raw_result.replace("```json", "")
     raw_result = raw_result.replace("```", "")
+
+    raw_result = re.sub(r"//.*", "", raw_result)
+    raw_result = re.sub(r",(\s*[}\]])", r"\1", raw_result)
+
+    start = raw_result.find("{")
+    end = raw_result.rfind("}")
+
+    if start != -1 and end != -1 and end > start:
+        raw_result = raw_result[start:end + 1]
+
     return raw_result.strip()
 
 
@@ -62,9 +75,13 @@ def clean_number(value):
     text = text.replace("TND", "")
     text = text.replace("mDT", "")
     text = text.replace("Dinars Tunisiens", "")
+    text = text.replace("Dinars", "")
+    text = text.replace("dinars", "")
+    text = text.replace(" ", "")
     text = text.strip()
 
     numbers = re.findall(r"-?\d+", text)
+
     if not numbers:
         return None
 
@@ -109,8 +126,6 @@ def merge_financial_results(chunk_results):
 
         if not isinstance(result, dict) or "error" in result:
             continue
-
-        document_type = str(result.get("document_type", "")).lower()
 
         if final_result["company_name"] is None and result.get("company_name"):
             final_result["company_name"] = result.get("company_name")
@@ -248,18 +263,25 @@ Analyse le texte suivant et retourne UNIQUEMENT un JSON valide avec cette struct
     "keywords": []
 }}
 
+Règles obligatoires :
+- Réponds uniquement avec du JSON valide.
+- Ne mets pas de markdown.
+- Ne mets pas de commentaires.
+- N'invente aucune information.
+
 Texte :
 {req.text}
 """
     raw_result = ask_model(prompt, model="mistral")
-    raw_result = clean_json_response(raw_result)
+    cleaned_result = clean_json_response(raw_result)
 
     try:
-        parsed_result = json.loads(raw_result)
+        parsed_result = json.loads(cleaned_result)
     except json.JSONDecodeError:
         parsed_result = {
             "error": "Model did not return valid JSON",
-            "raw_response": raw_result
+            "raw_response": raw_result,
+            "cleaned_response": cleaned_result
         }
 
     return {
@@ -336,13 +358,45 @@ def financial_extract(req: ModelTextRequest):
     start_time = time.time()
 
     prompt = f"""
-Tu es un expert en analyse financière.
+Tu es un moteur d'extraction JSON spécialisé en états financiers.
 
-Retourne UNIQUEMENT un JSON valide avec cette structure :
+IMPORTANT :
+- Réponds UNIQUEMENT avec un JSON valide.
+- Ne réponds jamais en Markdown.
+- Ne mets jamais ```json.
+- Ne mets jamais de commentaires //.
+- Ne mets jamais d'explication.
+- La réponse doit commencer par {{.
+- La réponse doit finir par }}.
+- Si une valeur n'existe pas clairement dans le texte, utilise null.
+- Si une liste est vide, utilise [].
+- Les nombres doivent être des nombres simples, sans espaces, sans devise et sans texte.
+- Ne jamais écrire "105849 KDT", écrire seulement 105849.
+- N'invente jamais une information.
+
+Règles d'extraction :
+- company_name : nom de la société ou banque.
+- period : exercice, année ou période financière.
+- total_assets : valeur associée à "Total actifs", "Total des actifs" ou "Total actif".
+- net_assets : valeur associée à "Capitaux propres" ou "Total capitaux propres".
+- revenue : valeur associée à "Produits", "Revenus", "Produit net bancaire" ou "Total produits".
+- net_profit : valeur associée à "Résultat de l'exercice", "Résultat net" ou "Bénéfice net".
+- expenses : valeur associée à "Charges", "Total charges" ou "Dépenses".
+- currency : devise mentionnée dans le texte, par exemple KDT, TND ou Dinars.
+
+Anti-erreur :
+- Ne prends jamais "flux de trésorerie", "solde", "variation de trésorerie", "liquidités" ou "provisions" comme net_profit.
+- Ne concatène jamais plusieurs colonnes ou plusieurs années.
+- Si la relation entre le label et le montant n'est pas claire, retourne null.
+- Ne mets jamais de commentaires dans le JSON.
+
+Retourne EXACTEMENT cette structure JSON :
 
 {{
     "company_name": null,
     "period": null,
+    "total_assets": null,
+    "net_assets": null,
     "revenue": null,
     "net_profit": null,
     "expenses": null,
@@ -354,29 +408,35 @@ Retourne UNIQUEMENT un JSON valide avec cette structure :
     "summary": null
 }}
 
-N'invente aucune information.
-
 Texte :
 {req.text}
 """
     raw_result = ask_model(prompt, model=req.model)
-    raw_result = clean_json_response(raw_result)
+    cleaned_result = clean_json_response(raw_result)
 
     execution_time = time.time() - start_time
 
     try:
-        parsed_result = json.loads(raw_result)
+        parsed_result = json.loads(cleaned_result)
         json_valid = True
     except json.JSONDecodeError:
         parsed_result = {
             "error": "Model did not return valid JSON",
-            "raw_response": raw_result
+            "raw_response": raw_result,
+            "cleaned_response": cleaned_result
         }
         json_valid = False
 
+    if isinstance(parsed_result, dict) and "error" not in parsed_result:
+        parsed_result["total_assets"] = clean_number(parsed_result.get("total_assets"))
+        parsed_result["net_assets"] = clean_number(parsed_result.get("net_assets"))
+        parsed_result["revenue"] = clean_number(parsed_result.get("revenue"))
+        parsed_result["net_profit"] = clean_number(parsed_result.get("net_profit"))
+        parsed_result["expenses"] = clean_number(parsed_result.get("expenses"))
+
     log_financial_extraction(
         model=req.model,
-        prompt_version="v1",
+        prompt_version="financial_text_v2_strict_json",
         input_length=len(req.text),
         execution_time=execution_time,
         json_valid=json_valid
@@ -475,17 +535,18 @@ Document :
 {text}
 """
     raw_result = ask_model(prompt, model="mistral")
-    raw_result = clean_json_response(raw_result)
+    cleaned_result = clean_json_response(raw_result)
 
     execution_time = time.time() - start_time
 
     try:
-        parsed_result = json.loads(raw_result)
+        parsed_result = json.loads(cleaned_result)
         json_valid = True
     except json.JSONDecodeError:
         parsed_result = {
             "error": "Model did not return valid JSON",
-            "raw_response": raw_result
+            "raw_response": raw_result,
+            "cleaned_response": cleaned_result
         }
         json_valid = False
 
@@ -583,16 +644,17 @@ Morceau du document :
 {chunk}
 """
         raw_result = ask_model(prompt, model=model)
-        raw_result = clean_json_response(raw_result)
+        cleaned_result = clean_json_response(raw_result)
 
         try:
-            parsed_result = json.loads(raw_result)
+            parsed_result = json.loads(cleaned_result)
         except json.JSONDecodeError:
             invalid_chunks += 1
             parsed_result = {
                 "error": "Invalid JSON",
                 "chunk_index": index,
-                "raw_response": raw_result
+                "raw_response": raw_result,
+                "cleaned_response": cleaned_result
             }
 
         chunk_results.append({
@@ -608,7 +670,7 @@ Morceau du document :
 
     log_financial_extraction(
         model=model,
-        prompt_version="financial_pdf_chunked_v7_fixed_net_profit",
+        prompt_version="financial_pdf_chunked_v8_strict_json",
         input_length=len(text),
         execution_time=execution_time,
         json_valid=json_valid

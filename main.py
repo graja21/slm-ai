@@ -54,8 +54,14 @@ def clean_json_response(raw_result):
     raw_result = raw_result.replace("```json", "")
     raw_result = raw_result.replace("```", "")
 
+    # Remove JavaScript-style comments
     raw_result = re.sub(r"//.*", "", raw_result)
+
+    # Remove trailing commas before } or ]
     raw_result = re.sub(r",(\s*[}\]])", r"\1", raw_result)
+
+    # Fix invalid JSON numbers like 4_566 -> 4566
+    raw_result = re.sub(r"(?<=\d)_(?=\d)", "", raw_result)
 
     start = raw_result.find("{")
     end = raw_result.rfind("}")

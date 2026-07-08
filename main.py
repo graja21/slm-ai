@@ -575,6 +575,549 @@ Document :
     }
 
 
+def normalize_pdf_text(text: str) -> str:
+    if text is None:
+        return ""
+
+    text = text.replace("\xa0", " ")
+    text = text.replace("\u202f", " ")
+    text = text.replace("\ufeff", "")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+
+    return text.strip()
+
+
+def strip_accents(value: str) -> str:
+    import unicodedata
+
+    value = unicodedata.normalize("NFKD", value or "")
+    return "".join(char for char in value if not unicodedata.combining(char))
+
+
+def normalize_key(value: str) -> str:
+    value = strip_accents(value or "")
+    value = value.lower()
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+
+def parse_amount(value):
+    if value is None:
+        return None
+
+    value = str(value).strip()
+
+    if value.lower() in ["na", "n/a", "null", "none", "-"]:
+        return None
+
+    negative = False
+
+    if "(" in value and ")" in value:
+        negative = True
+
+    value = value.replace("(", "").replace(")", "")
+    value = value.replace("\xa0", " ")
+    value = value.replace("\u202f", " ")
+    value = value.strip()
+
+    # Keep only numeric thousand groups.
+    parts = re.findall(r"\d+", value)
+
+    if not parts:
+        return None
+
+    try:
+        amount = int("".join(parts))
+    except ValueError:
+        return None
+
+    return abs(amount) if negative or amount < 0 else amount
+
+
+def _groups_to_amount(groups):
+    if not groups:
+        return None
+
+    try:
+        return int("".join(groups))
+    except ValueError:
+        return None
+
+
+def _split_plain_numeric_groups(groups):
+    """
+    Split OCR/PDF text numeric groups into table columns.
+
+    Examples:
+    - ["692", "633", "744", "228", "701", "188"]
+      => [692633, 744228, 701188]
+
+    - ["15", "244", "878", "14", "476", "639", "14", "476", "639"]
+      => [15244878, 14476639, 14476639]
+
+    - ["1", "373", "273", "1", "352", "085", "1", "352", "085"]
+      => [1373273, 1352085, 1352085]
+    """
+
+    groups = [str(g) for g in groups if str(g).strip() != ""]
+
+    if not groups:
+        return []
+
+    # Remove a note number before financial columns when present.
+    # Example: "Total des Capitaux propres 12 1 373 273 ..."
+    if (
+        len(groups) > 4
+        and groups[0].isdigit()
+        and int(groups[0]) <= 50
+        and (len(groups) - 1) % 3 == 0
+    ):
+        groups = groups[1:]
+
+    amounts = []
+
+    # Most annual reports use 3 financial columns:
+    # current year, previous year published, previous year restated.
+    if len(groups) >= 6 and len(groups) % 3 == 0:
+        size = len(groups) // 3
+        for i in range(0, len(groups), size):
+            amount = _groups_to_amount(groups[i:i + size])
+            if amount is not None:
+                amounts.append(amount)
+        return amounts
+
+    # Many note tables use 2 columns: current year and previous year.
+    if len(groups) >= 4 and len(groups) % 2 == 0:
+        size = len(groups) // 2
+        for i in range(0, len(groups), size):
+            amount = _groups_to_amount(groups[i:i + size])
+            if amount is not None:
+                amounts.append(amount)
+        return amounts
+
+    amount = _groups_to_amount(groups)
+    return [amount] if amount is not None else []
+
+
+def extract_amounts_from_line(line: str):
+    if not line:
+        return []
+
+    clean_line = line.replace("\xa0", " ").replace("\u202f", " ")
+
+    amounts = []
+
+    # First extract parenthesized values as complete negative accounting amounts.
+    # Example: "(755 632)" => 755632
+    parenthesized = re.findall(r"\(\s*-?\d+(?:\s+\d{3})*\s*\)", clean_line)
+    for value in parenthesized:
+        amount = parse_amount(value)
+        if amount is not None:
+            amounts.append(amount)
+
+    # Remove parenthesized parts so their internal groups are not reused.
+    clean_line = re.sub(r"\(\s*-?\d+(?:\s+\d{3})*\s*\)", " ", clean_line)
+
+    # Remove dates to avoid 31/12/2025 becoming numeric candidates.
+    clean_line = re.sub(r"\b\d{1,2}\s*/\s*\d{1,2}\s*/\s*\d{2,4}\b", " ", clean_line)
+
+    # Extract numeric groups. A group is a block of digits between separators.
+    groups = re.findall(r"\b\d+\b", clean_line)
+
+    # Remove isolated years from table labels.
+    groups = [
+        group for group in groups
+        if int(group) not in [2020, 2021, 2022, 2023, 2024, 2025, 2026, 2027]
+    ]
+
+    plain_amounts = _split_plain_numeric_groups(groups)
+
+    for amount in plain_amounts:
+        if amount is not None:
+            amounts.append(amount)
+
+    return amounts
+
+
+def get_best_amount_from_line(line: str, prefer_recent_column: bool = True, absolute: bool = False):
+    amounts = extract_amounts_from_line(line)
+
+    filtered = []
+
+    for amount in amounts:
+        if abs(amount) in [2020, 2021, 2022, 2023, 2024, 2025, 2026, 2027]:
+            continue
+        filtered.append(amount)
+
+    if not filtered:
+        return None
+
+    # Most financial statements display current year first, previous year second.
+    # Some notes display repeated previous values. For the main tables, first numeric amount is preferred.
+    amount = filtered[0] if prefer_recent_column else filtered[-1]
+
+    if absolute and amount is not None:
+        return abs(amount)
+
+    return amount
+
+
+def find_line_amount(text: str, labels: list[str], min_value: int = 0, absolute: bool = False):
+    lines = normalize_pdf_text(text).splitlines()
+    normalized_labels = [normalize_key(label) for label in labels]
+
+    candidates = []
+
+    for index, line in enumerate(lines):
+        line_key = normalize_key(line)
+
+        if any(label in line_key for label in normalized_labels):
+            amount = get_best_amount_from_line(line, absolute=absolute)
+
+            if amount is None:
+                continue
+
+            if abs(amount) < min_value:
+                continue
+
+            # Prefer exact/specific lines over broad lines.
+            score = 100
+
+            for label in normalized_labels:
+                if line_key == label:
+                    score += 80
+                elif line_key.startswith(label):
+                    score += 50
+                elif label in line_key:
+                    score += 30
+
+            # Earlier lines usually correspond to official statements; later lines are notes.
+            score -= min(index, 2000) / 1000
+
+            candidates.append({
+                "score": score,
+                "line_index": index,
+                "line": line,
+                "amount": amount
+            })
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    return candidates[0]["amount"]
+
+
+def extract_company_name(text: str):
+    clean_text = normalize_pdf_text(text)
+
+    known_companies = [
+        "BH BANK",
+        "AMEN BANK",
+        "BIAT",
+        "ATTIJARI BANK",
+        "BANQUE DE TUNISIE",
+        "STB BANK",
+        "BNA",
+        "UIB",
+        "UBCI",
+        "BTK BANK",
+        "ZITOUNA BANK",
+        "WIFAK BANK"
+    ]
+
+    for company in known_companies:
+        if re.search(rf"\b{re.escape(company)}\b", clean_text, re.IGNORECASE):
+            return company
+
+    ignored_keys = {
+        normalize_key("AVIS DES SOCIETES"),
+        normalize_key("ETATS FINANCIERS"),
+        normalize_key("ETATS FINANCIERS CONSOLIDES"),
+        normalize_key("BILAN"),
+        normalize_key("ETAT DE RESULTAT"),
+        normalize_key("ETAT DE FLUX DE TRESORERIE"),
+        normalize_key("NOTES AUX ETATS FINANCIERS"),
+        normalize_key("RAPPORT GENERAL")
+    }
+
+    for line in clean_text.splitlines()[:90]:
+        candidate = line.strip()
+        key = normalize_key(candidate)
+
+        if not candidate or len(candidate) < 3:
+            continue
+
+        if key in ignored_keys:
+            continue
+
+        if any(word in key for word in ["siege", "social", "exercice", "page", "rapport", "commissaire"]):
+            continue
+
+        if re.fullmatch(r"[A-ZÀ-ÖØ-Ý0-9][A-ZÀ-ÖØ-Ý0-9 &.'\-]{2,}", candidate):
+            return candidate
+
+    return None
+
+
+def extract_period(text: str):
+    clean_text = normalize_pdf_text(text)
+
+    patterns = [
+        r"31\s*/\s*12\s*/\s*(20\d{2})",
+        r"31\s*d[ée]cembre\s*(20\d{2})",
+        r"31\s*decembre\s*(20\d{2})",
+        r"exercice\s*(?:clos\s*)?(?:au\s*)?31\s*d[ée]cembre\s*(20\d{2})",
+        r"exercice\s*(20\d{2})"
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, clean_text, re.IGNORECASE)
+        if match:
+            return f"31/12/{match.group(1)}"
+
+    years = re.findall(r"\b20\d{2}\b", clean_text)
+
+    if years:
+        # Current reports usually contain the current year many times.
+        return max(set(years), key=years.count)
+
+    return None
+
+
+def detect_currency(text: str):
+    key = normalize_key(normalize_pdf_text(text))
+
+    if "unite en mille dinars" in key or "en mille dinars" in key or "milliers de dinars" in key:
+        return "KDT"
+
+    if "kdt" in key or "mdt" in key:
+        return "KDT"
+
+    if "tnd" in key or "dinar tunisien" in key or "dinars tunisiens" in key:
+        return "TND"
+
+    if "eur" in key or "euro" in key:
+        return "EUR"
+
+    if "usd" in key or "dollar" in key:
+        return "USD"
+
+    if "dinar" in key:
+        return "Dinar"
+
+    return None
+
+
+def extract_total_assets(text: str):
+    return find_line_amount(
+        text,
+        [
+            "Total des actifs",
+            "Total actifs",
+            "Total actif",
+            "Total assets"
+        ],
+        min_value=10000,
+        absolute=True
+    )
+
+
+def extract_net_assets(text: str):
+    return find_line_amount(
+        text,
+        [
+            "Total des capitaux propres",
+            "Total capitaux propres",
+            "Capitaux propres",
+            "Total equity",
+            "Shareholders equity",
+            "Total shareholders equity"
+        ],
+        min_value=10000,
+        absolute=True
+    )
+
+
+def extract_revenue(text: str):
+    # Strongly prefer the exact banking income line over broad "total products" lines.
+    value = find_line_amount(
+        text,
+        [
+            "Total produit net bancaire",
+            "Produit net bancaire",
+            "Net banking income"
+        ],
+        min_value=10000,
+        absolute=True
+    )
+
+    if value is not None:
+        return value
+
+    return find_line_amount(
+        text,
+        [
+            "Total revenue",
+            "Revenue",
+            "Total operating income",
+            "Total produits d exploitation",
+            "Total produits bancaires"
+        ],
+        min_value=10000,
+        absolute=True
+    )
+
+
+def extract_expenses(text: str):
+    value = find_line_amount(
+        text,
+        [
+            "Total charges d exploitation bancaire",
+            "Charges d exploitation bancaire",
+            "Total operating expenses",
+            "Operating expenses",
+            "Total expenses"
+        ],
+        min_value=10000,
+        absolute=True
+    )
+
+    if value is not None:
+        return abs(value)
+
+    value = find_line_amount(
+        text,
+        [
+            "Total charges",
+            "Charges",
+            "Expenses"
+        ],
+        min_value=10000,
+        absolute=True
+    )
+
+    return abs(value) if value is not None else None
+
+
+def extract_net_profit(text: str):
+    value = find_line_amount(
+        text,
+        [
+            "Résultat net de l exercice",
+            "Resultat net de l exercice",
+            "Résultat de l exercice",
+            "Resultat de l exercice",
+            "Net profit for the year",
+            "Profit for the year",
+            "Net income"
+        ],
+        min_value=1000,
+        absolute=False
+    )
+
+    return value
+
+
+def deterministic_financial_extraction(text: str):
+    clean_text = normalize_pdf_text(text)
+
+    return {
+        "company_name": extract_company_name(clean_text),
+        "document_type": "Etats financiers",
+        "period": extract_period(clean_text),
+        "total_assets": extract_total_assets(clean_text),
+        "net_assets": extract_net_assets(clean_text),
+        "revenue": extract_revenue(clean_text),
+        "net_profit": extract_net_profit(clean_text),
+        "expenses": extract_expenses(clean_text),
+        "growth_rate": None,
+        "currency": detect_currency(clean_text),
+        "important_dates": [],
+        "financial_indicators": [],
+        "risks_or_observations": [],
+        "summary": None
+    }
+
+
+def apply_llm_fallback(deterministic_result, llm_result):
+    final_result = deterministic_result.copy()
+
+    for key in [
+        "company_name",
+        "document_type",
+        "period",
+        "currency"
+    ]:
+        if not final_result.get(key) and llm_result.get(key):
+            final_result[key] = llm_result.get(key)
+
+    for key in [
+        "total_assets",
+        "net_assets",
+        "revenue",
+        "net_profit",
+        "expenses"
+    ]:
+        if final_result.get(key) is None and llm_result.get(key) is not None:
+            final_result[key] = clean_number(llm_result.get(key))
+
+    if isinstance(final_result.get("expenses"), int):
+        final_result["expenses"] = abs(final_result["expenses"])
+
+    final_result["important_dates"] = llm_result.get("important_dates", [])
+    final_result["financial_indicators"] = llm_result.get("financial_indicators", [])
+    final_result["risks_or_observations"] = llm_result.get("risks_or_observations", [])
+    final_result["summary"] = llm_result.get("summary")
+
+    return final_result
+
+
+def validate_financial_result(final_result):
+    warnings = []
+
+    total_assets = final_result.get("total_assets")
+    net_assets = final_result.get("net_assets")
+    revenue = final_result.get("revenue")
+    expenses = final_result.get("expenses")
+    net_profit = final_result.get("net_profit")
+
+    if final_result.get("company_name") is None:
+        warnings.append("Company name is missing.")
+
+    if final_result.get("period") is None:
+        warnings.append("Financial period is missing.")
+
+    if total_assets is None:
+        warnings.append("Total assets value is missing.")
+
+    if net_profit is None:
+        warnings.append("Net profit value is missing.")
+
+    if isinstance(total_assets, int) and isinstance(net_assets, int):
+        if net_assets > total_assets:
+            warnings.append("Net assets cannot be greater than total assets.")
+
+    if isinstance(revenue, int) and isinstance(net_profit, int):
+        if abs(net_profit) > revenue:
+            warnings.append("Net profit is greater than revenue, please review extraction.")
+
+    if isinstance(expenses, int) and isinstance(total_assets, int):
+        if expenses > total_assets:
+            warnings.append("Expenses value seems abnormally high.")
+
+    if isinstance(revenue, int) and revenue > 1000000000:
+        warnings.append("Revenue value seems abnormally high.")
+
+    final_result["validation_warnings"] = warnings
+    final_result["validation_status"] = "valid" if len(warnings) == 0 else "needs_review"
+
+    return final_result
+
+
 @app.post("/financial-pdf-chunked")
 async def financial_pdf_chunked(
     file: UploadFile = File(...),
@@ -591,6 +1134,8 @@ async def financial_pdf_chunked(
         page_text = page.extract_text()
         if page_text:
             text += page_text + "\n"
+
+    text = normalize_pdf_text(text)
 
     chunks = split_text_into_chunks(text, chunk_size=4000)
     chunks = chunks[:5]
@@ -614,18 +1159,19 @@ IMPORTANT :
 - Pour financial_indicators, retourne [] sauf si l'information est courte et claire.
 
 Règles strictes :
-- total_assets : uniquement "Total actifs", "Total des actifs" ou "Total actif".
-- net_assets : uniquement "Capitaux propres" ou "Total capitaux propres".
-- revenue : uniquement "Produits", "Revenus", "Produit net bancaire" ou "Total produits".
-- net_profit : uniquement "Résultat de l'exercice", "Résultat net" ou "Bénéfice net".
-- expenses : uniquement "Charges", "Total charges" ou "Dépenses".
+- total_assets : uniquement "Total actifs", "Total des actifs", "Total actif" ou "Total assets".
+- net_assets : uniquement "Total capitaux propres", "Capitaux propres", "Total equity" ou "Shareholders equity".
+- revenue : uniquement "Produit net bancaire", "Net banking income", "Total revenue" ou "Revenue".
+- net_profit : uniquement "Résultat de l'exercice", "Résultat net de l'exercice", "Net profit" ou "Net income".
+- expenses : uniquement "Charges d'exploitation bancaire", "Total charges", "Total expenses" ou "Operating expenses".
 
 Anti-erreur :
 - Ne prends jamais "flux de trésorerie", "solde", "variation de trésorerie", "liquidités" ou "provisions" comme net_profit.
 - Ne concatène jamais plusieurs colonnes ou plusieurs années.
-- Si deux années sont présentes, prends uniquement la valeur 2025.
+- Si deux années sont présentes, prends uniquement la valeur la plus récente ou la colonne 2025.
 - Si la relation entre le label et le montant n'est pas claire, retourne null.
 - Les montants doivent être des nombres simples, sans espaces ni devise.
+- Les charges doivent être positives.
 
 Retourne exactement cette structure JSON :
 
@@ -668,7 +1214,10 @@ Morceau du document :
             "result": parsed_result
         })
 
-    final_result = merge_financial_results(chunk_results)
+    deterministic_result = deterministic_financial_extraction(text)
+    llm_result = merge_financial_results(chunk_results)
+
+    final_result = apply_llm_fallback(deterministic_result, llm_result)
     final_result = validate_financial_result(final_result)
 
     execution_time = time.time() - start_time
@@ -676,7 +1225,7 @@ Morceau du document :
 
     log_financial_extraction(
         model=model,
-        prompt_version="financial_pdf_chunked_v8_strict_json",
+        prompt_version="financial_pdf_chunked_v10_hybrid_regex_llm_validation",
         input_length=len(text),
         execution_time=execution_time,
         json_valid=json_valid
@@ -691,7 +1240,8 @@ Morceau du document :
         "chunks_processed": len(chunks),
         "invalid_chunks": invalid_chunks,
         "final_result": final_result,
-        "chunk_results": chunk_results
+        "chunk_results": chunk_results,
+        "extraction_strategy": "v10_hybrid_regex_first_llm_fallback_validation"
     }
 
 

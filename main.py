@@ -1118,6 +1118,130 @@ def validate_financial_result(final_result):
     return final_result
 
 
+def sanitize_chunk_result(result: dict, reference_result: dict | None = None) -> dict:
+    """Clean LLM chunk output so raw chunk_results do not expose OCR/LLM garbage.
+
+    The final financial values are extracted deterministically from the full PDF.
+    Chunk values are kept only when they are clean and consistent with the final
+    deterministic extraction. Conflicting values are nulled and listed in
+    ignored_fields for traceability.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    numeric_fields = [
+        "total_assets",
+        "net_assets",
+        "revenue",
+        "net_profit",
+        "expenses"
+    ]
+
+    ignored_fields = []
+
+    invalid_text_values = {
+        "",
+        "na",
+        "n/a",
+        "null",
+        "none",
+        "non claire",
+        "not found",
+        "not available",
+        "n.d",
+        "nd",
+        "-"
+    }
+
+    for field in numeric_fields:
+        original_value = result.get(field)
+
+        if original_value is None:
+            result[field] = None
+            continue
+
+        if isinstance(original_value, list):
+            result[field] = None
+            ignored_fields.append({
+                "field": field,
+                "value": original_value,
+                "reason": "list_value_is_not_a_numeric_amount"
+            })
+            continue
+
+        if isinstance(original_value, str) and original_value.strip().lower() in invalid_text_values:
+            result[field] = None
+            continue
+
+        cleaned = clean_number(original_value)
+
+        if cleaned is None:
+            result[field] = None
+            ignored_fields.append({
+                "field": field,
+                "value": original_value,
+                "reason": "not_numeric"
+            })
+            continue
+
+        if field == "expenses":
+            cleaned = abs(cleaned)
+
+        # remove obvious OCR/LLM concatenations before reference comparison
+        if field == "net_profit" and abs(cleaned) > 1_000_000:
+            result[field] = None
+            ignored_fields.append({
+                "field": field,
+                "value": original_value,
+                "cleaned_value": cleaned,
+                "reason": "abnormally_high_net_profit_probable_column_concatenation"
+            })
+            continue
+
+        if field == "revenue" and abs(cleaned) > 50_000_000:
+            result[field] = None
+            ignored_fields.append({
+                "field": field,
+                "value": original_value,
+                "cleaned_value": cleaned,
+                "reason": "abnormally_high_revenue_probable_column_concatenation"
+            })
+            continue
+
+        # If a trusted deterministic value exists, do not keep contradictory LLM values.
+        if reference_result and isinstance(reference_result.get(field), int):
+            trusted_value = reference_result[field]
+            tolerance = max(2, int(abs(trusted_value) * 0.02))
+
+            if abs(cleaned - trusted_value) > tolerance:
+                result[field] = None
+                ignored_fields.append({
+                    "field": field,
+                    "value": original_value,
+                    "cleaned_value": cleaned,
+                    "trusted_value": trusted_value,
+                    "reason": "conflicts_with_deterministic_pdf_extraction"
+                })
+                continue
+
+        result[field] = cleaned
+
+    if result.get("net_assets") is not None and result.get("total_assets") is not None:
+        if result["net_assets"] > result["total_assets"]:
+            ignored_fields.append({
+                "field": "net_assets",
+                "value": result["net_assets"],
+                "reason": "net_assets_greater_than_total_assets"
+            })
+            result["net_assets"] = None
+
+    result["source"] = "llm_chunk_sanitized"
+    result["ignored_fields"] = ignored_fields
+    result["chunk_validation_status"] = "clean" if not ignored_fields else "cleaned"
+
+    return result
+
+
 @app.post("/financial-pdf-chunked")
 async def financial_pdf_chunked(
     file: UploadFile = File(...),
@@ -1136,6 +1260,8 @@ async def financial_pdf_chunked(
             text += page_text + "\n"
 
     text = normalize_pdf_text(text)
+
+    deterministic_result = deterministic_financial_extraction(text)
 
     chunks = split_text_into_chunks(text, chunk_size=4000)
     chunks = chunks[:5]
@@ -1200,6 +1326,7 @@ Morceau du document :
 
         try:
             parsed_result = json.loads(cleaned_result)
+            parsed_result = sanitize_chunk_result(parsed_result, deterministic_result)
         except json.JSONDecodeError:
             invalid_chunks += 1
             parsed_result = {
@@ -1214,7 +1341,6 @@ Morceau du document :
             "result": parsed_result
         })
 
-    deterministic_result = deterministic_financial_extraction(text)
     llm_result = merge_financial_results(chunk_results)
 
     final_result = apply_llm_fallback(deterministic_result, llm_result)

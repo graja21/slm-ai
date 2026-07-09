@@ -98,12 +98,13 @@ def normalize_financial_values(final_result):
     net_profit = final_result.get("net_profit")
 
     if isinstance(net_profit, int):
-        if net_profit > 100000000:
-            net_profit_str = str(net_profit)
-            if net_profit_str.startswith("248652"):
-                final_result["net_profit"] = 248652
-
-        if net_profit < 10000:
+        # A net profit above this threshold for these reports is almost
+        # always an OCR/LLM column-concatenation artefact (e.g. two years'
+        # figures glued together), not a real value, so it is nulled out
+        # rather than kept as a wrong number.
+        if abs(net_profit) > 50_000_000:
+            final_result["net_profit"] = None
+        elif abs(net_profit) < 1000:
             final_result["net_profit"] = None
 
     return final_result
@@ -164,10 +165,11 @@ def merge_financial_results(chunk_results):
         if expenses is not None and final_result["expenses"] is None:
             final_result["expenses"] = expenses
 
-        if net_profit is not None:
-            if net_profit > 100000000 and str(net_profit).startswith("248652"):
-                final_result["net_profit"] = 248652
-            elif 10000 <= net_profit <= 500000:
+        if net_profit is not None and final_result["net_profit"] is None:
+            # Reject obvious OCR/LLM column-concatenation artefacts (a huge
+            # number formed by gluing several years' figures together)
+            # instead of only recognising one memorized example value.
+            if abs(net_profit) <= 50_000_000:
                 final_result["net_profit"] = net_profit
 
         if isinstance(result.get("important_dates"), list):
@@ -619,11 +621,9 @@ def parse_amount(value):
         negative = True
 
     value = value.replace("(", "").replace(")", "")
-    value = value.replace("\xa0", " ")
-    value = value.replace("\u202f", " ")
+    value = value.replace("\xa0", " ").replace("\u202f", " ")
     value = value.strip()
 
-    # Keep only numeric thousand groups.
     parts = re.findall(r"\d+", value)
 
     if not parts:
@@ -637,120 +637,149 @@ def parse_amount(value):
     return abs(amount) if negative or amount < 0 else amount
 
 
-def _groups_to_amount(groups):
-    if not groups:
-        return None
-
-    try:
-        return int("".join(groups))
-    except ValueError:
-        return None
+_YEAR_LIKE_VALUES = {2020, 2021, 2022, 2023, 2024, 2025, 2026, 2027}
 
 
-def _split_plain_numeric_groups(groups):
+def _tokens_to_amounts(tokens: list[str]) -> list[int]:
+    """Convert digit tokens from one financial statement row into separate amounts.
+
+    This version fixes both cases:
+    - "Total actifs 12 569 041 11 855 711" -> [12569041, 11855711]
+    - "Produit net Bancaire 590 069 566 487" -> [590069, 566487]
+
+    Rule:
+    - A financial amount is normally one leading group of 1-3 digits followed by
+      one or two 3-digit groups.
+    - When a row is made only of 3-digit groups, pair them by default because
+      Tunisian bank statements in KDT commonly display values like 590 069.
+    - Small note references are removed before grouping.
     """
-    Split OCR/PDF text numeric groups into table columns.
-
-    Examples:
-    - ["692", "633", "744", "228", "701", "188"]
-      => [692633, 744228, 701188]
-
-    - ["15", "244", "878", "14", "476", "639", "14", "476", "639"]
-      => [15244878, 14476639, 14476639]
-
-    - ["1", "373", "273", "1", "352", "085", "1", "352", "085"]
-      => [1373273, 1352085, 1352085]
-    """
-
-    groups = [str(g) for g in groups if str(g).strip() != ""]
-
-    if not groups:
+    if not tokens:
         return []
 
-    # Remove a note number before financial columns when present.
-    # Example: "Total des Capitaux propres 12 1 373 273 ..."
-    if (
-        len(groups) > 4
-        and groups[0].isdigit()
-        and int(groups[0]) <= 50
-        and (len(groups) - 1) % 3 == 0
-    ):
-        groups = groups[1:]
+    clean_tokens = []
+    for token in tokens:
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            value = int(token)
+        except ValueError:
+            continue
+        if value in _YEAR_LIKE_VALUES:
+            continue
+        clean_tokens.append(token)
+
+    if not clean_tokens:
+        return []
+
+    # Drop a small note-reference when it clearly appears before the amounts.
+    # Example: "Total capitaux propres 12 1 707 363 1 574 007".
+    if len(clean_tokens) >= 4:
+        first_value = int(clean_tokens[0])
+        if first_value <= 99 and len(clean_tokens[1]) <= 1:
+            clean_tokens = clean_tokens[1:]
+
+    # Also drop a single small note reference before clearly grouped amounts.
+    # Example: "Total des Capitaux propres 12 1 373 273 1 352 085".
+    if len(clean_tokens) >= 5:
+        first_value = int(clean_tokens[0])
+        if first_value <= 99 and len(clean_tokens[1]) <= 3 and len(clean_tokens[2]) == 3:
+            # Only drop if the remaining token count can form 2 or 3 statement columns.
+            remaining = len(clean_tokens) - 1
+            if remaining in (4, 6, 8, 9):
+                clean_tokens = clean_tokens[1:]
 
     amounts = []
+    i = 0
+    n = len(clean_tokens)
 
-    # Most annual reports use 3 financial columns:
-    # current year, previous year published, previous year restated.
-    if len(groups) >= 6 and len(groups) % 3 == 0:
-        size = len(groups) // 3
-        for i in range(0, len(groups), size):
-            amount = _groups_to_amount(groups[i:i + size])
-            if amount is not None:
-                amounts.append(amount)
-        return amounts
+    while i < n:
+        token = clean_tokens[i]
+        remaining = n - i
 
-    # Many note tables use 2 columns: current year and previous year.
-    if len(groups) >= 4 and len(groups) % 2 == 0:
-        size = len(groups) // 2
-        for i in range(0, len(groups), size):
-            amount = _groups_to_amount(groups[i:i + size])
-            if amount is not None:
-                amounts.append(amount)
-        return amounts
+        # If all remaining tokens are 3-digit groups, values are usually paired:
+        # 590 069 566 487 -> 590069, 566487
+        # 692 633 744 228 701 188 -> 692633, 744228, 701188
+        if all(len(t) == 3 for t in clean_tokens[i:]):
+            if remaining >= 2 and remaining % 2 == 0:
+                group_size = 2
+            elif remaining >= 3 and remaining % 3 == 0:
+                group_size = 3
+            else:
+                group_size = 1
 
-    amount = _groups_to_amount(groups)
-    return [amount] if amount is not None else []
+            group = clean_tokens[i:i + group_size]
+            amounts.append(int("".join(group)))
+            i += group_size
+            continue
 
+        # Normal grouped amount: leading 1-3 digits plus following 3-digit groups.
+        group = [token]
+        i += 1
+
+        # Take up to two following thousand groups. This covers KDT values up to billions
+        # while preventing one amount from swallowing the next year column.
+        while i < n and len(clean_tokens[i]) == 3 and len(group) < 3:
+            group.append(clean_tokens[i])
+            i += 1
+
+            # Stop early if the next token starts a new amount with 1-2 digits.
+            if i < n and len(clean_tokens[i]) < 3:
+                break
+
+        amounts.append(int("".join(group)))
+
+    return amounts
 
 def extract_amounts_from_line(line: str):
+    """Extract separate numeric columns from a financial statement line.
+
+    This fixes the old bug where a row like:
+    "Total Produit net bancaire 692 633 744 228 701 188"
+    became one giant number: 692633744228701188.
+
+    Now it returns: [692633, 744228, 701188].
+    """
     if not line:
         return []
 
     clean_line = line.replace("\xa0", " ").replace("\u202f", " ")
 
-    amounts = []
-
-    # First extract parenthesized values as complete negative accounting amounts.
-    # Example: "(755 632)" => 755632
-    parenthesized = re.findall(r"\(\s*-?\d+(?:\s+\d{3})*\s*\)", clean_line)
-    for value in parenthesized:
-        amount = parse_amount(value)
-        if amount is not None:
-            amounts.append(amount)
-
-    # Remove parenthesized parts so their internal groups are not reused.
-    clean_line = re.sub(r"\(\s*-?\d+(?:\s+\d{3})*\s*\)", " ", clean_line)
-
-    # Remove dates to avoid 31/12/2025 becoming numeric candidates.
+    # Remove dates so 31/12/2025 is not treated as a value.
     clean_line = re.sub(r"\b\d{1,2}\s*/\s*\d{1,2}\s*/\s*\d{2,4}\b", " ", clean_line)
 
-    # Extract numeric groups. A group is a block of digits between separators.
-    groups = re.findall(r"\b\d+\b", clean_line)
+    # Parenthesized accounting amounts are independent columns.
+    parenthesized_values = re.findall(r"\(\s*-?\d+(?:\s+\d{3})*\s*\)", clean_line)
+    parenthesized_amounts = []
+    for value in parenthesized_values:
+        amount = parse_amount(value)
+        if amount is not None and amount >= 1000:
+            parenthesized_amounts.append(amount)
 
-    # Remove isolated years from table labels.
-    groups = [
-        group for group in groups
-        if int(group) not in [2020, 2021, 2022, 2023, 2024, 2025, 2026, 2027]
-    ]
+    # Remove parenthesized values before scanning normal values.
+    clean_line_no_parens = re.sub(r"\(\s*-?\d+(?:\s+\d{3})*\s*\)", " ", clean_line)
 
-    plain_amounts = _split_plain_numeric_groups(groups)
+    # Get raw digit groups. This intentionally does NOT use a greedy grouped
+    # number regex because rows may contain several adjacent grouped amounts.
+    tokens = re.findall(r"\b\d+\b", clean_line_no_parens)
+    plain_amounts = _tokens_to_amounts(tokens)
 
-    for amount in plain_amounts:
-        if amount is not None:
-            amounts.append(amount)
+    # If the row contains parenthesized values, they are usually the real
+    # accounting amounts for that line; plain tokens are often just note numbers.
+    if parenthesized_amounts:
+        return parenthesized_amounts
 
-    return amounts
+    return plain_amounts
 
 
-def get_best_amount_from_line(line: str, prefer_recent_column: bool = True, absolute: bool = False):
+def get_best_amount_from_line(line: str, prefer_recent_column: bool = True, absolute: bool = False, min_value: int = 0):
     amounts = extract_amounts_from_line(line)
 
-    filtered = []
-
-    for amount in amounts:
-        if abs(amount) in [2020, 2021, 2022, 2023, 2024, 2025, 2026, 2027]:
-            continue
-        filtered.append(amount)
+    filtered = [
+        amount for amount in amounts
+        if abs(amount) not in _YEAR_LIKE_VALUES and abs(amount) >= min_value
+    ]
 
     if not filtered:
         return None
@@ -775,12 +804,9 @@ def find_line_amount(text: str, labels: list[str], min_value: int = 0, absolute:
         line_key = normalize_key(line)
 
         if any(label in line_key for label in normalized_labels):
-            amount = get_best_amount_from_line(line, absolute=absolute)
+            amount = get_best_amount_from_line(line, absolute=absolute, min_value=min_value)
 
             if amount is None:
-                continue
-
-            if abs(amount) < min_value:
                 continue
 
             # Prefer exact/specific lines over broad lines.
@@ -1242,6 +1268,325 @@ def sanitize_chunk_result(result: dict, reference_result: dict | None = None) ->
     return result
 
 
+
+
+# =========================
+# V13 PRO FINANCIAL ENGINE
+# =========================
+
+def normalize_currency_value(value):
+    key = normalize_key(str(value or ""))
+
+    if not key:
+        return None
+
+    if "unite en mille dinars" in key or "mille dinars" in key or "milliers de dinars" in key:
+        return "KDT"
+
+    if "kdt" in key or "mdt" in key:
+        return "KDT"
+
+    if "dinar tunisien" in key or "dinars tunisiens" in key or "tnd" in key:
+        return "TND"
+
+    if "eur" in key or "euro" in key:
+        return "EUR"
+
+    if "usd" in key or "dollar" in key:
+        return "USD"
+
+    if "dinar" in key:
+        return "Dinar"
+
+    return str(value).strip() if value else None
+
+
+def extract_statement_sections(text: str):
+    clean_text = normalize_pdf_text(text)
+    lower = normalize_key(clean_text)
+
+    section_markers = [
+        ("balance_sheet", [" bilan ", " etat de la situation financiere ", " statement of financial position ", " balance sheet "]),
+        ("income_statement", [" etat de resultat ", " etat du resultat ", " compte de resultat ", " income statement ", " statement of profit or loss "]),
+        ("cash_flow", [" etat de flux de tresorerie ", " flux de tresorerie ", " cash flow "]),
+        ("notes", [" notes aux etats financiers ", " notes to financial statements "])
+    ]
+
+    positions = []
+
+    for name, markers in section_markers:
+        for marker in markers:
+            index = lower.find(marker.strip())
+            if index != -1:
+                positions.append((index, name))
+                break
+
+    positions.sort()
+    sections = {}
+
+    if not positions:
+        return {"full_document": clean_text}
+
+    for idx, (start, name) in enumerate(positions):
+        end = positions[idx + 1][0] if idx + 1 < len(positions) else len(clean_text)
+        sections[name] = clean_text[start:end]
+
+    sections["full_document"] = clean_text
+    return sections
+
+
+def find_line_amount_detail(text: str, labels: list[str], min_value: int = 0, absolute: bool = False):
+    lines = normalize_pdf_text(text).splitlines()
+    normalized_labels = [normalize_key(label) for label in labels]
+    candidates = []
+
+    for index, line in enumerate(lines):
+        line_key = normalize_key(line)
+
+        if not line_key:
+            continue
+
+        matched_label = None
+        for label in normalized_labels:
+            if label and label in line_key:
+                matched_label = label
+                break
+
+        if not matched_label:
+            continue
+
+        amount = get_best_amount_from_line(line, absolute=absolute, min_value=min_value)
+
+        if amount is None:
+            continue
+
+        score = 0.72
+
+        if line_key == matched_label:
+            score += 0.18
+        elif line_key.startswith(matched_label):
+            score += 0.14
+        else:
+            score += 0.08
+
+        if "total" in line_key:
+            score += 0.04
+
+        if re.search(r"31\s*/\s*12\s*/\s*20\d{2}|20\d{2}", line, re.IGNORECASE):
+            score += 0.02
+
+        # Earlier official statement pages are more reliable than long notes.
+        score -= min(index, 1500) / 10000
+        score = max(0.50, min(score, 0.99))
+
+        candidates.append({
+            "value": abs(amount) if absolute else amount,
+            "confidence": round(score, 2),
+            "source": "deterministic_regex",
+            "line_index": index,
+            "line": line.strip(),
+            "matched_label": matched_label
+        })
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item["confidence"], reverse=True)
+    return candidates[0]
+
+
+def _value_from_detail(detail):
+    return detail.get("value") if isinstance(detail, dict) else None
+
+
+def deterministic_financial_extraction_with_details(text: str):
+    clean_text = normalize_pdf_text(text)
+
+    # V14 fix:
+    # We intentionally scan the full normalized document for main statement labels.
+    # The previous section slicing used character positions from a normalized key string,
+    # which could cut the income statement too early and make the extractor fall back to
+    # broad lines like "Total produits bancaires" or "Charges générales d'exploitation".
+    balance_text = clean_text
+    income_text = clean_text
+
+    details = {}
+
+    details["total_assets"] = find_line_amount_detail(
+        balance_text,
+        ["Total des actifs", "Total actifs", "Total actif", "Total assets"],
+        min_value=10000,
+        absolute=True
+    )
+
+    details["net_assets"] = find_line_amount_detail(
+        balance_text,
+        ["Total des capitaux propres", "Total capitaux propres", "Capitaux propres", "Total equity", "Shareholders equity", "Total shareholders equity"],
+        min_value=10000,
+        absolute=True
+    )
+
+    # Banking revenue must prefer Produit Net Bancaire, not total banking products.
+    # French bank statements commonly use the plural "Produits nets bancaires" as
+    # much as the singular "Produit net bancaire" - both must be covered, otherwise
+    # the exact-substring match silently fails and the extractor falls through to a
+    # much weaker fallback (or the LLM), producing an inconsistent answer.
+    details["revenue"] = find_line_amount_detail(
+        income_text,
+        [
+            "Total produit net bancaire",
+            "Total produits nets bancaires",
+            "Produit net bancaire",
+            "Produits nets bancaires",
+            "Net banking income"
+        ],
+        min_value=10000,
+        absolute=True
+    )
+
+    if details["revenue"] is None:
+        details["revenue"] = find_line_amount_detail(
+            income_text,
+            [
+                "Total des produits d exploitation",
+                "Total produits d exploitation",
+                "Total produits bancaires",
+                "Total operating income",
+                "Total revenue"
+            ],
+            min_value=10000,
+            absolute=True
+        )
+
+    # Expenses must prefer the total banking operating expenses line, not a
+    # specific sub-item like "Charges générales d'exploitation" (CH7).
+    # Only lines that clearly say "total" are accepted here: a bare label like
+    # "Charges" matches almost any expense sub-line in the notes and would
+    # silently pick the wrong (much smaller) number.
+    details["expenses"] = find_line_amount_detail(
+        income_text,
+        [
+            "Total des charges d exploitation bancaire",
+            "Total charges d exploitation bancaire",
+            "Charges d exploitation bancaires",
+            "Charges d exploitation bancaire",
+            "Total operating expenses",
+            "Total expenses"
+        ],
+        min_value=10000,
+        absolute=True
+    )
+
+    if details["expenses"] is None:
+        details["expenses"] = find_line_amount_detail(
+            income_text,
+            [
+                "Total des charges",
+                "Total charges",
+                "Total operating expenses"
+            ],
+            min_value=10000,
+            absolute=True
+        )
+
+    details["net_profit"] = find_line_amount_detail(
+        income_text,
+        ["Résultat net de l exercice", "Resultat net de l exercice", "Résultat de l exercice", "Resultat de l exercice", "Net profit for the year", "Profit for the year", "Net income"],
+        min_value=1000,
+        absolute=False
+    )
+
+    company = extract_company_name(clean_text)
+    period = extract_period(clean_text)
+    currency = detect_currency(clean_text)
+
+    extraction_details = {
+        "company_name": {"value": company, "confidence": 0.95 if company else 0.0, "source": "deterministic_text"},
+        "document_type": {"value": "Etats financiers", "confidence": 0.90, "source": "deterministic_default"},
+        "period": {"value": period, "confidence": 0.92 if period else 0.0, "source": "deterministic_date_regex"},
+        "currency": {"value": currency, "confidence": 0.95 if currency else 0.0, "source": "deterministic_currency_regex"}
+    }
+
+    for field, detail in details.items():
+        extraction_details[field] = detail or {
+            "value": None,
+            "confidence": 0.0,
+            "source": "missing"
+        }
+
+    result = {
+        "company_name": company,
+        "document_type": "Etats financiers",
+        "period": period,
+        "total_assets": _value_from_detail(details.get("total_assets")),
+        "net_assets": _value_from_detail(details.get("net_assets")),
+        "revenue": _value_from_detail(details.get("revenue")),
+        "net_profit": _value_from_detail(details.get("net_profit")),
+        "expenses": _value_from_detail(details.get("expenses")),
+        "growth_rate": None,
+        "currency": currency,
+        "important_dates": [],
+        "financial_indicators": [],
+        "risks_or_observations": [],
+        "summary": None,
+        "extraction_details": extraction_details
+    }
+
+    if isinstance(result.get("expenses"), int):
+        result["expenses"] = abs(result["expenses"])
+        result["extraction_details"]["expenses"]["value"] = result["expenses"]
+
+    return result
+
+
+def deterministic_financial_extraction(text: str):
+    # V13 override: returns plain values + detailed confidence metadata.
+    return deterministic_financial_extraction_with_details(text)
+
+
+def apply_llm_fallback(deterministic_result, llm_result):
+    final_result = deterministic_result.copy()
+    extraction_details = final_result.get("extraction_details", {})
+
+    for key in ["company_name", "document_type", "period", "currency"]:
+        if not final_result.get(key) and llm_result.get(key):
+            final_result[key] = llm_result.get(key)
+            extraction_details[key] = {
+                "value": llm_result.get(key),
+                "confidence": 0.65,
+                "source": "llm_fallback"
+            }
+
+    for key in ["total_assets", "net_assets", "revenue", "net_profit", "expenses"]:
+        if final_result.get(key) is None and llm_result.get(key) is not None:
+            cleaned = clean_number(llm_result.get(key))
+            if cleaned is not None:
+                final_result[key] = abs(cleaned) if key == "expenses" else cleaned
+                extraction_details[key] = {
+                    "value": final_result[key],
+                    "confidence": 0.55,
+                    "source": "llm_fallback"
+                }
+
+    final_result["important_dates"] = llm_result.get("important_dates", [])
+    final_result["financial_indicators"] = llm_result.get("financial_indicators", [])
+    final_result["risks_or_observations"] = llm_result.get("risks_or_observations", [])
+    final_result["summary"] = llm_result.get("summary")
+    final_result["extraction_details"] = extraction_details
+
+    return final_result
+
+
+def normalize_chunk_currency(result: dict) -> dict:
+    if not isinstance(result, dict):
+        return result
+
+    normalized = normalize_currency_value(result.get("currency"))
+    if normalized:
+        result["currency"] = normalized
+
+    return result
+
 @app.post("/financial-pdf-chunked")
 async def financial_pdf_chunked(
     file: UploadFile = File(...),
@@ -1351,7 +1696,7 @@ Morceau du document :
 
     log_financial_extraction(
         model=model,
-        prompt_version="financial_pdf_chunked_v10_hybrid_regex_llm_validation",
+        prompt_version="financial_pdf_chunked_v15_fixed_column_amount_parser",
         input_length=len(text),
         execution_time=execution_time,
         json_valid=json_valid
@@ -1367,7 +1712,7 @@ Morceau du document :
         "invalid_chunks": invalid_chunks,
         "final_result": final_result,
         "chunk_results": chunk_results,
-        "extraction_strategy": "v10_hybrid_regex_first_llm_fallback_validation"
+        "extraction_strategy": "v16_pro_fixed_amount_grouping_parser"
     }
 
 

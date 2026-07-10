@@ -680,15 +680,12 @@ def _tokens_to_amounts(tokens: list[str]) -> list[int]:
         if first_value <= 99 and len(clean_tokens[1]) <= 1:
             clean_tokens = clean_tokens[1:]
 
-    # Also drop a single small note reference before clearly grouped amounts.
-    # Example: "Total des Capitaux propres 12 1 373 273 1 352 085".
-    if len(clean_tokens) >= 5:
-        first_value = int(clean_tokens[0])
-        if first_value <= 99 and len(clean_tokens[1]) <= 3 and len(clean_tokens[2]) == 3:
-            # Only drop if the remaining token count can form 2 or 3 statement columns.
-            remaining = len(clean_tokens) - 1
-            if remaining in (4, 6, 8, 9):
-                clean_tokens = clean_tokens[1:]
+    # V17 fix:
+    # Do NOT drop a leading small token when it can be the first group of a real amount.
+    # Example BH Bank: "Total des actifs 15 244 878 14 476 639 14 476 639"
+    # The token "15" is part of 15 244 878, not a note reference.
+    # We only drop a note reference when the next token is a very small leading digit,
+    # e.g. "Total des Capitaux propres 12 1 373 273 1 352 085" -> drop 12.
 
     amounts = []
     i = 0
@@ -1712,7 +1709,7 @@ Morceau du document :
         "invalid_chunks": invalid_chunks,
         "final_result": final_result,
         "chunk_results": chunk_results,
-        "extraction_strategy": "v16_pro_fixed_amount_grouping_parser"
+        "extraction_strategy": "v17_pro_fixed_note_vs_amount_parser"
     }
 
 

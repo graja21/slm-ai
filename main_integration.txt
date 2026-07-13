@@ -1,0 +1,12 @@
+1) Copy the folder financial_engine and the file financial_router.py into your ai-backend root.
+
+2) In your existing main.py, add:
+
+from financial_router import router as financial_router
+
+app.include_router(financial_router)
+
+3) Remove or rename your old @app.post("/financial-pdf-chunked") endpoint to avoid a duplicate route.
+
+4) Restart:
+python -m uvicorn main:app --reload

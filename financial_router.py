@@ -1,34 +1,62 @@
+from __future__ import annotations
+
 import time
-from fastapi import APIRouter, File, Query, UploadFile
+from io import BytesIO
 
-from financial_engine.extractor import extract_financial_data
-from financial_engine.pdf_reader import extract_pdf_text
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from pypdf import PdfReader
 
-router = APIRouter(tags=["Financial AI"])
+from financial_engine import FinancialExtractor
+
+
+router = APIRouter(tags=["Financial analysis"])
+extractor = FinancialExtractor()
 
 
 @router.post("/financial-pdf-chunked")
 async def financial_pdf_chunked(
     file: UploadFile = File(...),
-    model: str = Query("mistral"),
+    model: str = Query(default="mistral"),
 ):
-    start = time.time()
-    pdf_bytes = await file.read()
-    full_text, first_pages_text, page_count = extract_pdf_text(pdf_bytes)
-    final_result = extract_financial_data(full_text, first_pages_text, file.filename)
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
-    # This v18 endpoint deliberately keeps numeric extraction deterministic.
-    # LLM narrative enrichment can be reintroduced later without allowing it to overwrite numbers.
+    started = time.perf_counter()
+    data = await file.read()
+
+    if not data:
+        raise HTTPException(status_code=400, detail="The uploaded PDF is empty.")
+
+    try:
+        reader = PdfReader(BytesIO(data))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Unable to read PDF: {exc}") from exc
+
+    page_texts = [page.extract_text() or "" for page in reader.pages]
+    full_text = "\n".join(page_texts)
+
+    if not full_text.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="No extractable text found. OCR fallback is required.",
+        )
+
+    result = extractor.extract(
+        full_text=full_text,
+        page_texts=page_texts,
+        filename=file.filename,
+    )
+
     return {
         "model": model,
-        "task": "financial_pdf_chunked_extraction",
+        "task": "financial_pdf_profiled_extraction",
         "filename": file.filename,
-        "pages": page_count,
+        "pages": len(reader.pages),
         "total_text_length": len(full_text),
         "chunks_processed": 0,
         "invalid_chunks": 0,
-        "final_result": final_result,
+        "final_result": result.dict(),
         "chunk_results": [],
-        "execution_time_seconds": round(time.time() - start, 3),
-        "extraction_strategy": "v18_modular_deterministic_financial_engine",
+        "execution_time_seconds": round(time.perf_counter() - started, 3),
+        "extraction_strategy": "v20_2_verified_column_parser",
     }

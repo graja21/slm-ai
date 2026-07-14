@@ -1,0 +1,85 @@
+{
+  "company_name": "ASSURANCES BIAT",
+  "document_type": "Etats financiers - assurance",
+  "report_profile": "insurance",
+  "period": "31/12/2025",
+  "total_assets": 1135688143,
+  "net_assets": 128786575,
+  "revenue": 288600052,
+  "net_profit": 25648843,
+  "expenses": null,
+  "growth_rate": null,
+  "currency": "TND",
+  "important_dates": [],
+  "financial_indicators": [
+    {
+      "label": "life_earned_premiums",
+      "value": 204608752
+    },
+    {
+      "label": "non_life_earned_premiums",
+      "value": 83991300
+    }
+  ],
+  "risks_or_observations": [],
+  "summary": null,
+  "extraction_details": {
+    "company_name": {
+      "value": "ASSURANCES BIAT",
+      "confidence": 0.99,
+      "source": "first_pages_known_alias",
+      "matched_label": "assurances biat"
+    },
+    "document_type": {
+      "value": "insurance",
+      "confidence": 0.99,
+      "source": "profile_detector",
+      "evidence": "header:assurances, header:reassurance, header:primes acquises, header:provisions techniques, document:charges de sinistres"
+    },
+    "period": {
+      "value": "31/12/2025",
+      "confidence": 0.98,
+      "source": "first_pages_period"
+    },
+    "currency": {
+      "value": "TND",
+      "confidence": 0.8,
+      "source": "currency_text"
+    },
+    "total_assets": {
+      "value": 1135688143,
+      "confidence": 0.99,
+      "source": "deterministic_column_parser",
+      "line_index": 69,
+      "line": "TOTAL ACTIFS 1 164 952 822 29 264 680 1 135 688 143 932 111 990",
+      "matched_label": "total actifs"
+    },
+    "net_assets": {
+      "value": 128786575,
+      "confidence": 0.99,
+      "source": "deterministic_column_parser",
+      "line_index": 83,
+      "line": "Total capitaux propres avant affectation 128 786 575 103 738 796",
+      "matched_label": "total capitaux propres avant affectation"
+    },
+    "net_profit": {
+      "value": 25648843,
+      "confidence": 0.98,
+      "source": "deterministic_column_parser",
+      "line_index": 82,
+      "line": "CP6 Résultat de l'exercice 25 648 843 19 869 682",
+      "matched_label": "resultat de l exercice"
+    },
+    "revenue": {
+      "value": 288600052,
+      "confidence": 0.96,
+      "source": "insurance_earned_premiums_sum",
+      "components": [
+        204608752,
+        83991300
+      ]
+    }
+  },
+  "validation_warnings": [],
+  "validation_status": "valid"
+}

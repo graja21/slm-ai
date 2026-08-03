@@ -1,0 +1,41 @@
+{
+  "amen": {
+    "company_name": "AMEN BANK",
+    "report_profile": "bank",
+    "period": "31/12/2025",
+    "currency": "KDT",
+    "total_assets": 12569041,
+    "net_assets": 1707363,
+    "revenue": 590069,
+    "expenses": 644693,
+    "net_profit": 248652,
+    "validation_status": "valid",
+    "validation_warnings": []
+  },
+  "bh": {
+    "company_name": "BH BANK",
+    "report_profile": "bank",
+    "period": "31/12/2025",
+    "currency": "KDT",
+    "total_assets": 15244878,
+    "net_assets": 1373273,
+    "revenue": 692633,
+    "expenses": 755632,
+    "net_profit": 39769,
+    "validation_status": "valid",
+    "validation_warnings": []
+  },
+  "assurances_biat": {
+    "company_name": "ASSURANCES BIAT",
+    "report_profile": "insurance",
+    "period": "31/12/2025",
+    "currency": "TND",
+    "total_assets": 1135688143,
+    "net_assets": 128786575,
+    "revenue": 288600052,
+    "expenses": null,
+    "net_profit": 25648843,
+    "validation_status": "valid",
+    "validation_warnings": []
+  }
+}
